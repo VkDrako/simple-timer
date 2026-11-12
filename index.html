@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>タイマー</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: "Hiragino Sans", system-ui, sans-serif;
+      background: light-dark(#f7f6f1, #141619);
+      color: light-dark(#202523, #f3f4ef);
+      --accent: light-dark(#215c49, #a8e2c9);
+      --on-accent: light-dark(#fff, #162b23);
+    }
+
+    body { margin: 0; }
+
+    main {
+      min-height: 100svh;
+      box-sizing: border-box;
+      display: grid;
+      place-items: center;
+      padding: 1rem;
+    }
+
+    .timer {
+      width: 100%;
+      display: grid;
+      justify-items: center;
+      gap: 1rem;
+    }
+
+    #time {
+      display: block;
+      box-sizing: content-box;
+      width: 8ch;
+      max-width: 100%;
+      padding: 0;
+      border: 0;
+      border-radius: 0.06em;
+      background: transparent;
+      color: inherit;
+      font: 600 min(18vw, 36svh) / 1 ui-monospace, SFMono-Regular, Consolas, monospace;
+      text-align: center;
+    }
+
+    #time:focus-visible, button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 5px;
+    }
+
+    #status {
+      min-height: 1.5em;
+      margin: 0;
+      text-align: center;
+    }
+
+    .controls {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    button {
+      min-height: 3rem;
+      min-width: 8rem;
+      padding: 0.65rem 1.25rem;
+      border: 1px solid var(--accent);
+      border-radius: 0.6rem;
+      background: var(--accent);
+      color: var(--on-accent);
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    #reset {
+      background: transparent;
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+  <main aria-label="カウントダウンタイマー">
+    <div class="timer">
+      <input id="time" type="text" inputmode="numeric" value="00:00:00"
+        autocomplete="off" spellcheck="false" aria-label="時間（時、分、秒）"
+        aria-describedby="status">
+      <p id="status" role="status"></p>
+      <div class="controls">
+        <button id="action" type="button">開始</button>
+        <button id="reset" type="button" hidden>リセット</button>
+      </div>
+    </div>
+  </main>
+  <script>
+    const time = document.querySelector("#time");
+    const status = document.querySelector("#status");
+    const action = document.querySelector("#action");
+    const reset = document.querySelector("#reset");
+    const digitPositions = [0, 1, 3, 4, 6, 7];
+    const inputHint = "時・分・秒を数字で入力";
+    const alarmDuration = 30_000;
+
+    let mode = "ready";
+    let remaining = 0;
+    let deadline = 0;
+    let ticker;
+    let alarmTimeout;
+    let alarmDeadline;
+    let selectOnClick = false;
+    let audio;
+    let alarm;
+    let alarmBuffer;
+
+    function formatDigits(digits) {
+      return digits.match(/.{2}/g).join(":");
+    }
+
+    function showRemaining() {
+      const seconds = Math.ceil(remaining / 1000);
+      time.value = [
+        Math.floor(seconds / 3600),
+        Math.floor(seconds / 60) % 60,
+        seconds % 60
+      ].map(part => String(part).padStart(2, "0")).join(":");
+    }
+
+    function editTime(inserted, backwards = false, deletion = false) {
+      const start = time.selectionStart;
+      const end = time.selectionEnd;
+      const digits = time.value.replace(/\D/g, "").split("");
+      const firstDigit = digitPositions.filter(position => position < start).length;
+      const endDigit = digitPositions.filter(position => position < end).length;
+      let cursor = firstDigit;
+
+      if (firstDigit < endDigit) {
+        digits.fill("0", firstDigit, endDigit);
+      } else if (deletion) {
+        cursor = backwards ? Math.max(0, firstDigit - 1) : firstDigit;
+        if (cursor < digits.length) digits[cursor] = "0";
+      }
+
+      for (const digit of inserted.slice(0, digits.length - cursor)) {
+        digits[cursor++] = digit;
+      }
+
+      time.value = formatDigits(digits.join(""));
+      const nextPosition = digitPositions[cursor] ?? time.value.length;
+      time.setSelectionRange(nextPosition, nextPosition);
+      status.textContent = inputHint;
+      time.removeAttribute("aria-invalid");
+    }
+
+    time.addEventListener("focus", () => time.select());
+    time.addEventListener("pointerdown", () => {
+      selectOnClick = mode === "ready" && document.activeElement !== time;
+    });
+
+    time.addEventListener("click", () => {
+      if (selectOnClick) time.select();
+      selectOnClick = false;
+    });
+
+    time.addEventListener("beforeinput", event => {
+      if (mode !== "ready") return;
+      if (event.inputType.startsWith("delete")) {
+        event.preventDefault();
+        editTime("", event.inputType.endsWith("Backward"), true);
+      } else if (event.data !== null) {
+        event.preventDefault();
+        const digits = event.data.replace(/[^0-9０-９]/g, "").normalize("NFKC");
+        if (digits) editTime(digits);
+      }
+    });
+
+    time.addEventListener("paste", event => {
+      if (mode !== "ready") return;
+      event.preventDefault();
+      const digits = event.clipboardData.getData("text").normalize("NFKC").replace(/\D/g, "");
+      if (digits) editTime(digits);
+    });
+
+    time.addEventListener("input", () => {
+      const digits = time.value.normalize("NFKC").replace(/\D/g, "");
+      time.value = formatDigits(digits.slice(0, 6).padEnd(6, "0"));
+      status.textContent = inputHint;
+      time.removeAttribute("aria-invalid");
+    });
+
+    time.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.isComposing && mode === "ready") action.click();
+    });
+
+    function setMode(nextMode, label, message) {
+      mode = nextMode;
+      time.readOnly = mode !== "ready";
+      time.tabIndex = mode === "ready" ? 0 : -1;
+      action.textContent = label;
+      reset.hidden = mode !== "paused";
+      status.textContent = message;
+    }
+
+    function prepareAudio() {
+      try {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        audio ??= new AudioContextClass();
+        audio.resume().catch(() => {});
+      } catch {
+        // The visual notification remains available without audio.
+      }
+    }
+
+    function playAlarm(seconds) {
+      if (!audio || seconds <= 0) return;
+      if (!alarmBuffer) {
+        alarmBuffer = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+        const samples = alarmBuffer.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) {
+          const position = i / audio.sampleRate;
+          const pulse = position < 0.24 ? position : position - 0.33;
+          if (pulse >= 0 && pulse < 0.24) {
+            const envelope = Math.min(1, pulse / 0.015, (0.24 - pulse) / 0.03);
+            samples[i] = 0.22 * envelope * Math.sin(2 * Math.PI * 880 * position);
+          }
+        }
+      }
+      alarm = audio.createBufferSource();
+      alarm.buffer = alarmBuffer;
+      alarm.loop = true;
+      alarm.connect(audio.destination);
+      const now = audio.currentTime;
+      alarm.start(now);
+      alarm.stop(now + seconds);
+    }
+
+    function returnToReady() {
+      clearInterval(ticker);
+      clearTimeout(alarmTimeout);
+      if (alarm) {
+        alarm.stop();
+        alarm.disconnect();
+        alarm = undefined;
+      }
+      remaining = 0;
+      showRemaining();
+      setMode("ready", "開始", inputHint);
+    }
+
+    function finish() {
+      clearInterval(ticker);
+      alarmDeadline = Date.now() + alarmDuration;
+      setMode("ringing", "アラーム停止", "設定した時間が経過しました");
+      alarmTimeout = setTimeout(returnToReady, alarmDuration);
+      playAlarm(alarmDuration / 1000);
+    }
+
+    function updateCountdown() {
+      if (mode !== "running") return;
+      remaining = Math.max(0, deadline - Date.now());
+      showRemaining();
+      if (remaining === 0) finish();
+    }
+
+    function run() {
+      prepareAudio();
+      deadline = Date.now() + remaining;
+      setMode("running", "一時停止", "カウントダウン中");
+      action.focus();
+      ticker = setInterval(updateCountdown, 100);
+      updateCountdown();
+    }
+
+    action.addEventListener("click", () => {
+      if (mode === "ready") {
+        const [hours, minutes, seconds] = time.value.split(":").map(Number);
+        if (minutes > 59 || seconds > 59 || hours + minutes + seconds === 0) {
+          time.focus();
+          time.setAttribute("aria-invalid", "true");
+          status.textContent = minutes > 59 || seconds > 59
+            ? "分と秒は 00〜59 で入力してください"
+            : "1 秒以上の時間を入力してください";
+          return;
+        }
+        remaining = (hours * 3600 + minutes * 60 + seconds) * 1000;
+        run();
+      } else if (mode === "running") {
+        updateCountdown();
+        if (mode !== "running") return;
+        clearInterval(ticker);
+        setMode("paused", "再開", "一時停止中");
+      } else if (mode === "paused") {
+        run();
+      } else {
+        returnToReady();
+      }
+    });
+
+    reset.addEventListener("click", () => {
+      returnToReady();
+      action.focus();
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      if (mode === "ringing" && Date.now() >= alarmDeadline) {
+        returnToReady();
+      }
+      updateCountdown();
+    });
+
+    returnToReady();
+  </script>
+</body>
+</html>
